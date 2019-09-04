@@ -3,68 +3,18 @@
 """Probe multilingual BERT on cross-lingual retrieval."""
 
 import argparse
+import logging
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer, BertModel
 
-import logging
+from utils import (
+    text_data_generator, batch_generator, get_repr_from_layer, load_bert)
+
 logging.basicConfig(level=logging.INFO)
-
-
-def data_generator(path, tokenizer):
-    with open(path, 'r', encoding='utf-8') as f:
-        for line in f:
-            sentence = line.strip()
-
-            # 512 is the maximum input size of BERT
-            tokens = tokenizer.tokenize(sentence)
-            tokenized = ["[CLS]"] + tokens[:510] + ["[SEP]"]
-            token_ids = tokenizer.convert_tokens_to_ids(tokenized)
-            yield torch.tensor(token_ids)
-
-
-def pad_sentences(sentences):
-    max_len = max(ex.size(0) for ex in sentences)
-    padded_batch = torch.zeros(len(sentences), max_len, dtype=torch.int64)
-    for i, ex in enumerate(sentences):
-        padded_batch[i,:ex.size(0)] = ex
-    return padded_batch
-
-
-def batch_generator(generator, size):
-    sentences = []
-
-    for sentence in generator:
-        sentences.append(sentence)
-
-        if len(sentences) > size:
-            yield pad_sentences(sentences)
-            sentences = []
-    if sentences:
-        yield pad_sentences(sentences)
-
-
-def get_repr_from_layer(model, data, layer, mean_pool=False):
-    if layer >= 0:
-        layer_output = model(data, torch.zeros_like(data))[0][layer]
-        if mean_pool:
-            mask = (data != 0).float().unsqueeze(2)
-            lengths = mask.long().sum(1)
-
-            # Mask out [CLS] and [SEP] symbols as well.
-            mask[:,lengths - 1] = 0
-            mask[:,0] = 0
-            return (layer_output * mask).sum(1) / mask.sum(1)
-        else:
-            return layer_output[:, 0]
-    elif layer == -1:
-        if mean_pool:
-            raise ValueError(f"Cannot mean-pool the default vector.")
-        return model(data, torch.zeros_like(data))[1]
-    else:
-        raise ValueError(f"Invalid layer {layer}.")
 
 
 def cosine_distances(mat1, mat2):
@@ -134,9 +84,7 @@ def main():
     torch.set_num_threads(args.num_threads)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=False)
-    model = BertModel.from_pretrained(args.bert_model).to(device)
-    model.eval()
+    tokenizer, model = load_bert(args.bert_model, device)[:2]
 
     representations = []
 
@@ -148,7 +96,7 @@ def main():
                     model, sentence_tensor, args.layer,
                     mean_pool=args.mean_pool)
                 for sentence_tensor in batch_generator(
-                    data_generator(text_file, tokenizer), 64)]
+                    text_data_generator(text_file, tokenizer), 64)]
 
             lng_repr = torch.cat(vectors, dim=0)
             if args.center_lng:
@@ -157,7 +105,7 @@ def main():
             representations.append(lng_repr)
 
         data_len = representations[0].shape[0]
-        assert(all(r.shape[0] == data_len for r in representations))
+        assert all(r.shape[0] == data_len for r in representations)
         print()
         for k in [1, 5, 10, 20, 50, 100]:
             print(f"Recall at {k}, random baseline {k / data_len:.5f}")

@@ -11,27 +11,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer, BertModel
-from utils import text_data_generator, batch_generator, get_repr_from_layer
+from utils import vectors_for_sentence
 
 import logging
 import sys
 logging.basicConfig(level=logging.INFO)
-
-
-def repr_for_txt_file(filename, tokenizer, model, device, layer, center_lng=True, mean_pool=True):
-    print(f"Processing {filename}", file=sys.stderr)
-    with torch.no_grad():
-        vectors = [
-            get_repr_from_layer(
-                model, sentence_tensor.to(device), layer,
-                mean_pool=mean_pool).cpu()
-            for sentence_tensor in batch_generator(
-                text_data_generator(filename, tokenizer), 32)]
-
-        lng_repr = torch.cat(vectors, dim=0)
-        if center_lng:
-            lng_repr = lng_repr - lng_repr.mean(0, keepdim=True)
-    return lng_repr
 
 
 def main():
@@ -49,9 +33,6 @@ def main():
     parser.add_argument(
         "mt", type=str, help="Machine-translated sentences.")
     parser.add_argument(
-        "--mean-pool", default=False, action="store_true",
-        help="If true, use mean-pooling instead of [CLS] vecotr.")
-    parser.add_argument(
         "--center-lng", default=False, action="store_true",
         help="If true, center representations first.")
     parser.add_argument(
@@ -67,20 +48,44 @@ def main():
     model = BertModel.from_pretrained(args.bert_model).to(device)
     model.eval()
 
-    src_repr = repr_for_txt_file(
-        args.src, tokenizer, model, device, args.layer,
-        center_lng=args.center_lng, mean_pool=args.mean_pool)
-    mt_repr = repr_for_txt_file(
-        args.mt, tokenizer, model, device, args.layer,
-        center_lng=args.center_lng, mean_pool=args.mean_pool)
+    print(f"Loading src: {args.src}", file=sys.stderr)
+    with open(args.src) as f_src:
+        with torch.no_grad():
+            src_repr = [
+                vectors_for_sentence(
+                    tokenizer, model, line.rstrip(), args.layer).numpy()
+                for line in f_src]
 
-    src_norm = (src_repr * src_repr).sum(1).sqrt()
-    mt_norm = (mt_repr * mt_repr).sum(1).sqrt()
+    print(f"Loading mt: {args.mt}", file=sys.stderr)
+    with open(args.mt) as f_mt:
+        with torch.no_grad():
+            mt_repr = [
+                vectors_for_sentence(
+                    tokenizer, model, line.rstrip(), args.layer).numpy()
+                for line in f_mt]
 
-    cosine = (src_repr * mt_repr).sum(1) / src_norm / mt_norm
+    if args.center_lng:
+        src_center = np.mean(np.concatenate(src_repr), 0)
+        mt_center = np.mean(np.concatenate(mt_repr), 0)
 
-    for num in cosine.cpu().detach().numpy():
-        print(num)
+        src_repr = [r - src_center for r in src_repr]
+        mt_repr = [r - mt_center for r in mt_repr]
+
+    for src, mt in zip(src_repr, mt_repr):
+        similarity = (
+            np.dot(src, mt.T)
+                / np.expand_dims(np.linalg.norm(src, axis=1), 1)
+                / np.expand_dims(np.linalg.norm(mt, axis=1), 0))
+
+        recall = similarity.max(1).sum() / similarity.shape[0]
+        precision = similarity.max(0).sum() / similarity.shape[1]
+
+        if recall + precision > 0:
+            f_score = 2 * recall * precision / (recall + precision)
+        else:
+            f_score = 0
+
+        print(f_score)
 
 
 if __name__ == "__main__":

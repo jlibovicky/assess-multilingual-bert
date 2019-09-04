@@ -14,7 +14,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 
 
-def data_generator(path, tokenizer):
+def text_data_generator(path, tokenizer):
     with open(path, 'r', encoding='utf-8') as f:
         for line in f:
             sentence = line.strip()
@@ -61,7 +61,7 @@ def main():
             entropies_sums = None
             sentence_count = 0
 
-            for sentence_tensor in data_generator(input_file, tokenizer):
+            for sentence_tensor in text_data_generator(input_file, tokenizer):
                 sentence_count += 1
                 layer_attentions = model(sentence_tensor.unsqueeze(0))[0]
                 head_count = layer_attentions[0].shape[1]

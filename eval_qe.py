@@ -5,7 +5,7 @@ import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
 """
-Script to evaluate outputs of machine translation quality estimation 
+Script to evaluate outputs of machine translation quality estimation
 systems for the sentence level, in the WMT 2019 format.
 
 The system output and gold files should have one HTER value per line.
@@ -28,7 +28,10 @@ if __name__ == '__main__':
 
     # pearsonr and spearmanr return (correlation, p_value)
     pearson = pearsonr(gold, system)[0]
-    print('Pearson correlation: %.4f' % pearson)
+    if args.verbose:
+        print('Pearson correlation: %.4f' % pearson)
+    else:
+        print(pearson)
 
     if args.verbose:
         spearman = spearmanr(gold, system)[0]

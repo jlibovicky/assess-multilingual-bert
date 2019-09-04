@@ -4,13 +4,16 @@
 """Train language ID with BERT."""
 
 import argparse
+import logging
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer, BertModel
 
-import logging
+from utils import text_data_generator, batch_generator, get_repr_from_layer, load_bert
+
 logging.basicConfig(level=logging.INFO)
 
 LANGUAGES = [
@@ -28,67 +31,13 @@ LANGUAGES = [
 LNG2IDX = {lng: i for i, lng in enumerate(LANGUAGES)}
 
 
-def data_generator(path, tokenizer, skip_tokenization, epochs=1):
-    for _ in range(epochs) :
+def lng_data_generator(path, epochs=1):
+    for _ in range(epochs):
         with open(path, 'r', encoding='utf-8') as f:
             for line in f:
-                if '\t' not in line:
-                    print(f"Warning: line without \\t: '{line.strip()}'")
-                    continue
-                try:
-                    sentence, lng = line.strip().split("\t")
-                except ValueError:
-                    continue
+                lng = line.strip()
                 lng_id = LNG2IDX[lng]
-
-                # 512 is the maximum input size of BERT
-                if skip_tokenization:
-                    tokens = sentence.strip().split(" ")
-                else:
-                    tokens = tokenizer.tokenize(sentence.strip())
-                tokenized = ["[CLS]"] + tokens[:100] + ["[SEP]"]
-                token_ids = tokenizer.convert_tokens_to_ids(tokenized)
-                yield torch.tensor(token_ids), torch.tensor(lng_id)
-
-
-def pad_sentences(sentences):
-    max_len = max(ex.size(0) for ex in sentences)
-    padded_batch = torch.zeros(len(sentences), max_len, dtype=torch.int64)
-    for i, ex in enumerate(sentences):
-        padded_batch[i,:ex.size(0)] = ex
-    return padded_batch
-
-
-def batch_generator(generator, size):
-    sentences = []
-    languages = []
-
-    for sentence, lng in generator:
-        sentences.append(sentence)
-        languages.append(lng)
-
-        if len(sentences) > size:
-            yield pad_sentences(sentences), torch.stack(languages)
-            sentences = []
-            languages = []
-    if sentences:
-        yield pad_sentences(sentences), torch.stack(languages)
-
-
-def get_repr_from_layer(model, data, layer, mean_pool=False):
-    if layer >= 0:
-        layer_output = model(data, torch.zeros_like(data))[0][layer]
-        if mean_pool:
-            mask = (data != 0).float().unsqueeze(2)
-            return (layer_output * mask).sum(1) / mask.sum(1)
-        else:
-            return layer_output[:, 0]
-    elif layer == -1:
-        if mean_pool:
-            raise ValueError(f"Cannot mean-pool the default vector.")
-        return model(data, torch.zeros_like(data))[1]
-    else:
-        raise ValueError(f"Invalid layer {layer}.")
+                yield torch.tensor(lng_id)
 
 
 def get_centroids(device, model, data, labels, layer, mean_pool=False):
@@ -105,6 +54,16 @@ def get_centroids(device, model, data, labels, layer, mean_pool=False):
     return centroids
 
 
+def load_and_batch_data(txt, lng, tokenizer, batch_size=32, epochs=1):
+    text_batches = batch_generator(
+        text_data_generator(
+            txt, tokenizer, epochs=epochs, max_len=110),
+        size=batch_size, padding=True)
+    lng_batches = batch_generator(
+        lng_data_generator(lng, epochs=epochs), size=batch_size, padding=False)
+    return zip(text_batches, lng_batches)
+
+
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument(
@@ -116,11 +75,17 @@ def main():
         "layer", type=int,
         help="Layer from of layer from which the representation is taken.")
     parser.add_argument(
-        "train_data", type=str, help="Sentences with language for training.")
+        "train_data_txt", type=str, help="Training sentences.")
     parser.add_argument(
-        "val_data", type=str, help="Sentences with language for validation.")
+        "train_data_lng", type=str, help="Language codes for training sentences.")
     parser.add_argument(
-        "test_data", type=str, help="Sentences with language for testing.")
+        "val_data_txt", type=str, help="Validation sentences.")
+    parser.add_argument(
+        "val_data_lng", type=str, help="Language codes for validation sentences.")
+    parser.add_argument(
+        "test_data_txt", type=str, help="Test sentences.")
+    parser.add_argument(
+        "test_data_lng", type=str, help="Language codes for test sentences.")
     parser.add_argument(
         "--hidden", default=None, type=int,
         help="Size of the hidden classification layer.")
@@ -142,10 +107,8 @@ def main():
     torch.set_num_threads(args.num_threads)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    tokenizer = BertTokenizer.from_pretrained(
-        args.bert_model, do_lower_case=args.bert_model.endswith("-uncased"))
-    model = BertModel.from_pretrained(args.bert_model).to(device)
-    model.eval()
+    tokenizer, model, model_dim, _ = load_bert(
+        args.bert_model, device)
 
     if args.layer < -1:
         print("Layer index cannot be negative.")
@@ -155,12 +118,9 @@ def main():
         print(f"Model only has {num_layers} layers, {args.layer} is too much.")
         exit(1)
 
-    model_dim = model.encoder.layer[args.layer].output.dense.out_features
-
-    vocab_size = model.embeddings.word_embeddings.weight.size(0)
-
-    train_data = data_generator(args.train_data, tokenizer, args.skip_tokenization, epochs=1000)
-    train_batches = batch_generator(train_data, 32)
+    train_batches = load_and_batch_data(
+        args.train_data_txt, args.train_data_lng, tokenizer,
+        batch_size=32, epochs=1000)
     print("Train data iterator initialized.")
 
     centroids = None
@@ -176,9 +136,10 @@ def main():
                 args.layer, mean_pool=args.mean_pool)
         centroids = centroids.to(device)
 
-    print("Loading valiation data.")
-    val_data = data_generator(args.val_data, tokenizer, args.skip_tokenization)
-    val_batches_raw = list(batch_generator(val_data, 32))
+    print("Loading validation data.")
+    val_batches_raw = list(load_and_batch_data(
+        args.val_data_txt, args.val_data_lng, tokenizer,
+        batch_size=32, epochs=1))[:2]
     print("Validation data loaded in memory, pre-computing BERT.")
     val_batches = []
     with torch.no_grad():
@@ -188,8 +149,9 @@ def main():
             val_batches.append((bert_features, lng))
 
     print("Loading test data.")
-    test_data = data_generator(args.test_data, tokenizer, args.skip_tokenization)
-    test_batches_raw = list(batch_generator(test_data, 32))
+    test_batches_raw = list(load_and_batch_data(
+        args.test_data_txt, args.test_data_lng, tokenizer,
+        batch_size=32, epochs=1))[:2]
     print("Test data loaded in memory, pre-computing BERT.")
     test_batches = []
     with torch.no_grad():
@@ -209,7 +171,7 @@ def main():
             classifier = nn.Linear(model_dim, len(LANGUAGES))
         else:
             classifier = nn.Sequential(
-                nn.Linear(model_dim,  args.hidden),
+                nn.Linear(model_dim, args.hidden),
                 nn.ReLU(),
                 nn.Dropout(0.1),
                 nn.Linear(args.hidden, len(LANGUAGES)))
@@ -226,7 +188,8 @@ def main():
                 outputs = []
 
                 for bert_features, lng in data_batches:
-                    bert_features, lng = bert_features.to(device), lng.to(device)
+                    bert_features, lng = (
+                        bert_features.to(device), lng.to(device))
                     batch_size = bert_features.size(0)
 
                     if centroids is not None:
@@ -251,15 +214,16 @@ def main():
 
         best_accuracy = 0.0
         no_improvement = 0
-        lr_decreased = 0
-        lr = 1e-3
+        learning_rate_decreased = 0
+        learning_rate = 1e-3
 
         for i, (sentences, lng) in enumerate(train_batches):
             try:
                 classifier.train()
                 optimizer.zero_grad()
                 sentences, lng = sentences.to(device), lng.to(device)
-                bert_features = get_repr_from_layer(model, sentences, args.layer)
+                bert_features = get_repr_from_layer(
+                    model, sentences, args.layer)
 
                 if centroids is not None:
                     with torch.no_grad():
@@ -290,15 +254,16 @@ def main():
                         no_improvement += 1
 
                     if no_improvement >= 5:
-                        if lr_decreased >= 5:
-                            print("Learning rate decreased five times, ending.")
+                        if learning_rate_decreased >= 5:
+                            print(
+                                "Learning rate decreased five times, ending.")
                             break
 
-                        lr /= 2
-                        print(f"Decreasing learning rate to {lr}.")
+                        learning_rate /= 2
+                        print(f"Decreasing learning rate to {learning_rate}.")
                         for param_group in optimizer.param_groups:
-                            param_group['lr'] = lr
-                        lr_decreased += 1
+                            param_group['lr'] = learning_rate
+                        learning_rate_decreased += 1
                         no_improvement = 0
 
                     print()

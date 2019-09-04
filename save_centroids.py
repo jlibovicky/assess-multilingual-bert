@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer, BertModel
-from utils import data_generator, batch_generator, get_repr_from_layer
+from utils import text_data_generator, batch_generator, get_repr_from_layer
 
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -62,7 +62,7 @@ def main():
             name, code = line.strip().split("\t")
             data_file = os.path.join(args.data, f"{code}.txt")
 
-            data = data_generator(data_file, tokenizer)
+            data = text_data_generator(data_file, tokenizer)
             batches = batch_generator(data, args.batch_size)
             print(f"Data iterator initialized: {data_file}")
 
