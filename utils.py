@@ -1,5 +1,7 @@
+import os
 import torch
 from pytorch_pretrained_bert import BertTokenizer, BertModel
+
 
 def text_data_generator(path, tokenizer, epochs=1, max_len=510):
     with open(path, 'r', encoding='utf-8') as f_txt:
@@ -65,8 +67,13 @@ def get_repr_from_layer(model, data, layer, mean_pool=False):
     raise ValueError(f"Invalid layer {layer}.")
 
 
-def vectors_for_sentence(tokenizer, model, sentence, layer):
-    tokens = tokenizer.tokenize(sentence)
+def vectors_for_sentence(
+        tokenizer, model, sentence, layer, skip_tokenization=False):
+    if skip_tokenization:
+        tokens = sentence
+    else:
+        tokens = tokenizer.tokenize(sentence)
+
     tokenized = ["[CLS]"] + tokens[:510] + ["[SEP]"]
     token_ids = torch.tensor(
         tokenizer.convert_tokens_to_ids(tokenized)).unsqueeze(0)
@@ -74,7 +81,7 @@ def vectors_for_sentence(tokenizer, model, sentence, layer):
     layer_output = model(
         token_ids, torch.zeros_like(token_ids))[0][layer]
 
-    return layer_output.squeeze(0)[1:-1]
+    return layer_output.squeeze(0)[1:-1], tokenized[1:-1]
 
 
 PRETRAINED_BERTS = set([
@@ -86,11 +93,9 @@ PRETRAINED_BERTS = set([
 def load_bert(bert_spec, device):
     """Load pretrained BERT, either standard or from a file."""
 
-    # TODO try loading BERT from a local file
-
-    if bert_spec not in PRETRAINED_BERTS:
+    if not os.path.isdir(bert_spec) and bert_spec not in PRETRAINED_BERTS:
         raise ValueError(
-            f"{bert_spec} is not a pretrained BERT id."
+            f"{bert_spec} is not a directory neither a pretrained BERT id."
             f"Available: {' '.join(PRETRAINED_BERTS)}")
 
     tokenizer = BertTokenizer.from_pretrained(

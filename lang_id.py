@@ -67,21 +67,20 @@ def load_and_batch_data(txt, lng, tokenizer, batch_size=32, epochs=1):
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument(
-        "bert_model",
-        choices=["bert-base-uncased", "bert-large-uncased", "bert-base-cased",
-            "bert-base-multilingual-cased", "bert-base-multilingual-uncased", "bert-base-chinese"],
-        help="Variant of pre-trained model.")
+        "bert_model", type=str, help="Variant of pre-trained model.")
     parser.add_argument(
         "layer", type=int,
         help="Layer from of layer from which the representation is taken.")
     parser.add_argument(
         "train_data_txt", type=str, help="Training sentences.")
     parser.add_argument(
-        "train_data_lng", type=str, help="Language codes for training sentences.")
+        "train_data_lng", type=str,
+        help="Language codes for training sentences.")
     parser.add_argument(
         "val_data_txt", type=str, help="Validation sentences.")
     parser.add_argument(
-        "val_data_lng", type=str, help="Language codes for validation sentences.")
+        "val_data_lng", type=str,
+        help="Language codes for validation sentences.")
     parser.add_argument(
         "test_data_txt", type=str, help="Test sentences.")
     parser.add_argument(
