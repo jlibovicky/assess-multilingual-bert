@@ -23,37 +23,27 @@ def call_bert_and_collapse_tokens(filename, model, tokenizer, layer):
     with open(filename) as f_data:
         with torch.no_grad():
             for line in f_data:
-                vectors_torch, tokenized = vectors_for_sentence(
-                    tokenizer, model, line.rstrip(), layer)
-                vectors_np = vectors_torch.numpy()
-                dim = vectors_np.shape[1]
+                original_tokens = line.strip().split()
+                token_spans = []
+                bert_tokens = []
+                for token in original_tokens:
+                    bert_split = tokenizer.tokenize(token)
+                    token_spans.append(len(bert_split))
+                    bert_tokens.extend(bert_split)
+
+                vectors = vectors_for_sentence(
+                    tokenizer, model, bert_tokens, layer,
+                    skip_tokenization=True)[0].numpy()
 
                 vectors_squeezed = []
-                words_squeezed = []
-                current_vector = None
-                current_word = ""
-                current_vector_members = 0
-                for token, vec in zip(tokenized, vectors_np):
-                    if token.startswith("##"):
-                        if current_vector is None:
-                            current_vector = np.zeros((dim,))
-                        current_vector += vec
-                        current_word += token[2:]
-                        current_vector_members += 1
-                    else:
-                        if current_vector is not None:
-                            vectors_squeezed.append(
-                                current_vector / current_vector_members)
-                            words_squeezed.append(current_word)
-                        current_vector = vec
-                        current_word = token
-                        current_vector_members = 1
 
-                vectors_squeezed.append(
-                    current_vector / current_vector_members)
-                words_squeezed.append(current_word)
+                offset = 0
+                for span in token_spans:
+                    vectors_squeezed.append(
+                        np.mean(vectors[offset:offset + span], axis=0))
+                    offset += span
 
-                yield np.stack(vectors_squeezed), words_squeezed
+                yield np.stack(vectors_squeezed), original_tokens
 
 
 def reordering_penalty(src_size, tgt_size):
@@ -104,7 +94,7 @@ def main():
     print(f"Loading tgt: {args.tgt}", file=sys.stderr)
     tgt_repr = list(call_bert_and_collapse_tokens(
         args.tgt, model, tokenizer, args.layer))
-    print("Data loaded.")
+    print("Data loaded.", file=sys.stderr)
 
     if args.center_lng:
         src_center = np.mean(
@@ -131,11 +121,13 @@ def main():
         if args.verbose:
             for i, token in enumerate(src_tok):
                 aligned_indices = [tix for six, tix in alignment if six == i]
-                aligned_formatted = [f"{tgt_tok[j]} ({j})" for j in aligned_indices]
+                aligned_formatted = [
+                    f"{tgt_tok[j]} ({j})" for j in aligned_indices]
                 print(f"{i:2d}: {token} -- {', '.join(aligned_formatted)}")
             print()
         else:
-            print(edge_cover(distance))
+            print(" ".join(
+                f"{src_id}-{tgt_id}" for src_id, tgt_id in alignment))
 
 
 if __name__ == "__main__":
