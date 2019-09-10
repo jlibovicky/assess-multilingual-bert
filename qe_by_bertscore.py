@@ -4,27 +4,24 @@
 """Compute centroids of BERT representations for all languages."""
 
 import argparse
-import os
+import logging
+import sys
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer, BertModel
-from utils import vectors_for_sentence
 
-import logging
-import sys
+from utils import vectors_for_sentence, load_bert
+
 logging.basicConfig(level=logging.INFO)
 
 
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument(
-        "bert_model",
-        choices=["bert-base-uncased", "bert-large-uncased", "bert-base-cased",
-            "bert-base-multilingual-cased", "bert-base-multilingual-uncased", "bert-base-chinese"],
-        help="Variant of pre-trained model.")
+        "bert_model", type=str, help="Variant of pre-trained model.")
     parser.add_argument(
         "layer", type=int,
         help="Layer from of layer from which the representation is taken.")
@@ -35,25 +32,20 @@ def main():
     parser.add_argument(
         "--center-lng", default=False, action="store_true",
         help="If true, center representations first.")
-    parser.add_argument(
-        "--batch-size", type=int, default=32)
     parser.add_argument("--num-threads", type=int, default=4)
     args = parser.parse_args()
 
     torch.set_num_threads(args.num_threads)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    tokenizer = BertTokenizer.from_pretrained(
-        args.bert_model, do_lower_case=args.bert_model.endswith("-uncased"))
-    model = BertModel.from_pretrained(args.bert_model).to(device)
-    model.eval()
+    tokenizer, model = load_bert(args.bert_model, device)[:2]
 
     print(f"Loading src: {args.src}", file=sys.stderr)
     with open(args.src) as f_src:
         with torch.no_grad():
             src_repr = [
                 vectors_for_sentence(
-                    tokenizer, model, line.rstrip(), args.layer).numpy()
+                    tokenizer, model, line.rstrip(), args.layer)[0].numpy()
                 for line in f_src]
 
     print(f"Loading mt: {args.mt}", file=sys.stderr)
@@ -61,7 +53,7 @@ def main():
         with torch.no_grad():
             mt_repr = [
                 vectors_for_sentence(
-                    tokenizer, model, line.rstrip(), args.layer).numpy()
+                    tokenizer, model, line.rstrip(), args.layer)[0].numpy()
                 for line in f_mt]
 
     if args.center_lng:
@@ -74,8 +66,8 @@ def main():
     for src, mt in zip(src_repr, mt_repr):
         similarity = (
             np.dot(src, mt.T)
-                / np.expand_dims(np.linalg.norm(src, axis=1), 1)
-                / np.expand_dims(np.linalg.norm(mt, axis=1), 0))
+            / np.expand_dims(np.linalg.norm(src, axis=1), 1)
+            / np.expand_dims(np.linalg.norm(mt, axis=1), 0))
 
         recall = similarity.max(1).sum() / similarity.shape[0]
         precision = similarity.max(0).sum() / similarity.shape[1]

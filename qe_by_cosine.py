@@ -11,7 +11,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer, BertModel
-from utils import text_data_generator, batch_generator, get_repr_from_layer
+from utils import (
+    text_data_generator, batch_generator, get_repr_from_layer, load_bert)
 
 import logging
 import sys
@@ -37,10 +38,7 @@ def repr_for_txt_file(filename, tokenizer, model, device, layer, center_lng=True
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument(
-        "bert_model",
-        choices=["bert-base-uncased", "bert-large-uncased", "bert-base-cased",
-            "bert-base-multilingual-cased", "bert-base-multilingual-uncased", "bert-base-chinese"],
-        help="Variant of pre-trained model.")
+        "bert_model", type=str, help="Variant of pre-trained model.")
     parser.add_argument(
         "layer", type=int,
         help="Layer from of layer from which the representation is taken.")
@@ -62,10 +60,7 @@ def main():
     torch.set_num_threads(args.num_threads)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    tokenizer = BertTokenizer.from_pretrained(
-        args.bert_model, do_lower_case=args.bert_model.endswith("-uncased"))
-    model = BertModel.from_pretrained(args.bert_model).to(device)
-    model.eval()
+    tokenizer, model = load_bert(args.bert_model, device)[:2]
 
     src_repr = repr_for_txt_file(
         args.src, tokenizer, model, device, args.layer,
