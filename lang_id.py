@@ -12,55 +12,44 @@ import torch.nn as nn
 import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer, BertModel
 
-from utils import text_data_generator, batch_generator, get_repr_from_layer, load_bert
+from utils import (
+    text_data_generator, batch_generator, get_repr_from_layer, load_bert)
 
 logging.basicConfig(level=logging.INFO)
 
-LANGUAGES = [
-    "af", "an", "ar", "ast", "azb", "az", "bar", "ba", "be", "bg", "bn", "bpy",
-    "br", "bs", "ca", "ceb", "ce", "cs", "cy", "da", "de", "el", "en", "es",
-    "et", "eu", "fa", "fi", "fr", "fy", "ga", "gl", "gu", "he", "hi", "hr",
-    "ht", "hu", "hy", "id", "io", "is", "it", "ja", "jv", "ka", "kk", "kn",
-    "ko", "ky", "la", "lb", "lmo", "lt", "lv", "mg", "min", "mk", "ml", "mr",
-    "ms", "my", "nb", "nds", "ne", "new", "nl", "nn", "no", "oc", "pa", "pl",
-    "pms", "pnb", "pt", "ro", "ru", "scn", "sco", "sh", "sk", "sl", "sq", "sr",
-    "su", "sv", "sw", "ta", "te", "tg", "tl", "tr", "tt", "uk", "ur", "uz",
-    "vi", "vo", "war", "yo", "zh"]
 
-
-LNG2IDX = {lng: i for i, lng in enumerate(LANGUAGES)}
-
-
-def lng_data_generator(path, epochs=1):
+def lng_data_generator(path, lng2idx, epochs=1):
     for _ in range(epochs):
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
+        with open(path, 'r', encoding='utf-8') as f_lang:
+            for line in f_lang:
                 lng = line.strip()
-                lng_id = LNG2IDX[lng]
+                lng_id = lng2idx[lng]
                 yield torch.tensor(lng_id)
 
 
-def get_centroids(device, model, data, labels, layer, mean_pool=False):
+def get_centroids(
+        device, model, data, languages, labels, layer, mean_pool=False):
     """Get language centeroids based on labels."""
 
     labels = torch.cat(labels).to(device)
     text_repr = torch.cat([
         get_repr_from_layer(model, d.to(device), layer, mean_pool=mean_pool)
         for d in data])
-    centroids = torch.zeros((len(LANGUAGES), text_repr.size(1)))
-    for i, _ in enumerate(LANGUAGES):
+    centroids = torch.zeros((len(languages), text_repr.size(1)))
+    for i, _ in enumerate(languages):
         centroids[i] = text_repr[labels == i].mean(0)
 
     return centroids
 
 
-def load_and_batch_data(txt, lng, tokenizer, batch_size=32, epochs=1):
+def load_and_batch_data(txt, lng, tokenizer, lng2idx, batch_size=32, epochs=1):
     text_batches = batch_generator(
         text_data_generator(
             txt, tokenizer, epochs=epochs, max_len=110),
         size=batch_size, padding=True)
     lng_batches = batch_generator(
-        lng_data_generator(lng, epochs=epochs), size=batch_size, padding=False)
+        lng_data_generator(lng, lng2idx, epochs=epochs),
+        size=batch_size, padding=False)
     return zip(text_batches, lng_batches)
 
 
@@ -71,6 +60,9 @@ def main():
     parser.add_argument(
         "layer", type=int,
         help="Layer from of layer from which the representation is taken.")
+    parser.add_argument(
+        "languages", type=str,
+        help="File with a list of languages.")
     parser.add_argument(
         "train_data_txt", type=str, help="Training sentences.")
     parser.add_argument(
@@ -90,6 +82,10 @@ def main():
         help="Size of the hidden classification layer.")
     parser.add_argument("--num-threads", type=int, default=4)
     parser.add_argument(
+        "--save-model", type=str, help="Path where to save the best model.")
+    parser.add_argument(
+        "--save-centroids", type=str, help="Path to save language centroids.")
+    parser.add_argument(
         "--test-output", type=str, default=None,
         help="Output for example classification.")
     parser.add_argument(
@@ -102,6 +98,10 @@ def main():
         "--center-lng", default=False, action="store_true",
         help="Center languages to be around coordinate origin.")
     args = parser.parse_args()
+
+    with open(args.languages) as f_lang:
+        languages = [line.strip() for line in f_lang]
+    lng2idx = {lng: i for i, lng in enumerate(languages)}
 
     torch.set_num_threads(args.num_threads)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -119,7 +119,7 @@ def main():
 
     train_batches = load_and_batch_data(
         args.train_data_txt, args.train_data_lng, tokenizer,
-        batch_size=32, epochs=1000)
+        lng2idx, batch_size=32, epochs=1000)
     print("Train data iterator initialized.")
 
     centroids = None
@@ -131,14 +131,17 @@ def main():
                 texts.append(txt)
                 labels.append(lab)
             centroids = get_centroids(
-                device, model, texts, labels,
+                device, model, texts, languages, labels,
                 args.layer, mean_pool=args.mean_pool)
         centroids = centroids.to(device)
+
+        if args.save_centroids:
+            torch.save(centroids.cpu(), args.save_centroids)
 
     print("Loading validation data.")
     val_batches_raw = list(load_and_batch_data(
         args.val_data_txt, args.val_data_lng, tokenizer,
-        batch_size=32, epochs=1))[:2]
+        lng2idx, batch_size=32, epochs=1))[:2]
     print("Validation data loaded in memory, pre-computing BERT.")
     val_batches = []
     with torch.no_grad():
@@ -150,7 +153,7 @@ def main():
     print("Loading test data.")
     test_batches_raw = list(load_and_batch_data(
         args.test_data_txt, args.test_data_lng, tokenizer,
-        batch_size=32, epochs=1))[:2]
+        lng2idx, batch_size=32, epochs=1))[:2]
     print("Test data loaded in memory, pre-computing BERT.")
     test_batches = []
     with torch.no_grad():
@@ -162,18 +165,19 @@ def main():
 
     test_accuracies = []
     all_test_outputs = []
+    trained_models = []
 
     for exp_no in range(5):
         print(f"Starting experiment no {exp_no + 1}")
         print(f"------------------------------------")
         if args.hidden is None:
-            classifier = nn.Linear(model_dim, len(LANGUAGES))
+            classifier = nn.Linear(model_dim, len(languages))
         else:
             classifier = nn.Sequential(
                 nn.Linear(model_dim, args.hidden),
                 nn.ReLU(),
                 nn.Dropout(0.1),
-                nn.Linear(args.hidden, len(LANGUAGES)))
+                nn.Linear(args.hidden, len(languages)))
         classifier = classifier.to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(classifier.parameters(), lr=1e-3)
@@ -200,7 +204,8 @@ def main():
                     predicted_lng = prediction.max(-1)[1]
                     batch_accuracy = torch.sum((predicted_lng == lng).float())
 
-                    running_val_loss += batch_size * batch_loss.cpu().numpy().tolist()
+                    running_val_loss += (
+                        batch_size * batch_loss.cpu().numpy().tolist())
                     running_val_acc += batch_accuracy.cpu().numpy().tolist()
                     val_count += batch_size
 
@@ -280,8 +285,9 @@ def main():
 
         this_test_outputs = []
         for lng_prediction in test_outputs:
-            this_test_outputs.append(LANGUAGES[lng_prediction])
+            this_test_outputs.append(languages[lng_prediction])
         all_test_outputs.append(this_test_outputs)
+        trained_models.append(model.cpu())
 
     print()
     print("===============================================")
@@ -292,9 +298,12 @@ def main():
 
     best_exp_id = np.argmax(test_accuracies)
 
+    if args.save_model:
+        torch.save(trained_models[best_exp_id], args.save_model)
+
     if args.test_output is not None:
         with open(args.test_output, 'w') as f_out:
-            for prediction in test_outputs[best_exp_id]:
+            for prediction in all_test_outputs[best_exp_id]:
                 print(prediction, file=f_out)
 
 
