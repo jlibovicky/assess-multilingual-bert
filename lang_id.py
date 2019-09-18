@@ -287,7 +287,7 @@ def main():
         for lng_prediction in test_outputs:
             this_test_outputs.append(languages[lng_prediction])
         all_test_outputs.append(this_test_outputs)
-        trained_models.append(model.cpu())
+        trained_models.append(classifier.cpu())
 
     print()
     print("===============================================")
@@ -297,6 +297,8 @@ def main():
     print(f"Mean test stdev    {np.std(test_accuracies)}")
 
     best_exp_id = np.argmax(test_accuracies)
+
+    print(f"Best test accuracy {max(test_accuracies)}")
 
     if args.save_model:
         torch.save(trained_models[best_exp_id], args.save_model)
