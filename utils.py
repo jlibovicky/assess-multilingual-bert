@@ -45,10 +45,11 @@ def pad_sentences(sentences):
 
 
 def get_repr_from_layer(model, data, layer, mean_pool=False):
+    mask = (data != 0).float()
     if layer >= 0:
-        layer_output = model(data, torch.zeros_like(data))[0][layer]
+        layer_output = model(data, attention_mask=mask)[0][layer]
         if mean_pool:
-            mask = (data != 0).float().unsqueeze(2)
+            mask = mask.unsqueeze(2)
             lengths = mask.long().sum(1)
 
             # Mask out [CLS] and [SEP] symbols as well.
@@ -62,7 +63,7 @@ def get_repr_from_layer(model, data, layer, mean_pool=False):
     if layer == -1:
         if mean_pool:
             raise ValueError(f"Cannot mean-pool the default vector.")
-        return model(data, torch.zeros_like(data))[1]
+        return model(data, attention_mask=mask)[1]
 
     raise ValueError(f"Invalid layer {layer}.")
 
@@ -107,3 +108,30 @@ def load_bert(bert_spec, device):
     vocab_size = model.embeddings.word_embeddings.weight.size(0)
 
     return tokenizer, model, model_dim, vocab_size
+
+
+def get_lng_database():
+    lng_info = {}
+    with open("bert_languages_complete.tsv") as f_lng:
+        for line in f_lng:
+            fields = line.strip().split("\t")
+
+            record = {
+                "name": fields[0],
+                "iso": fields[2]}
+
+            if len(fields) > 3 and fields[3]:
+                record["genus"] = fields[3]
+            if len(fields) > 4 and fields[4]:
+                record["family"] = fields[4]
+            if len(fields) > 5 and fields[5]:
+                record["svo"] = fields[5]
+            if len(fields) > 6 and fields[6]:
+                record["sv"] = fields[6]
+            if len(fields) > 7 and fields[7]:
+                record["vo"] = fields[7]
+            if len(fields) > 8 and fields[8]:
+                record["adj-noun"] = fields[8]
+
+            lng_info[fields[0]] = record
+    return lng_info
