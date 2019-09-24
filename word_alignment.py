@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer, BertModel
+from sklearn.cross_decomposition import CCA
 
 from utils import vectors_for_sentence, load_bert
 from mwec import edge_cover
@@ -56,6 +57,49 @@ def reordering_penalty(src_size, tgt_size):
     return penalty_matrix
 
 
+def align(src_mat, tgt_mat, penalty, cca=None):
+    if cca is not None:
+        src_mat, tgt_mat = cca.transform(src_mat, tgt_mat)
+
+    # Cosine in (-1, 1) and MWEC requires positive weights => 2 -
+    distance = 2 - (
+        np.dot(src_mat, tgt_mat.T)
+        / np.expand_dims(np.linalg.norm(src_mat, axis=1), 1)
+        / np.expand_dims(np.linalg.norm(tgt_mat, axis=1), 0))
+
+    if penalty > 0:
+        distance += (
+            penalty * reordering_penalty(*distance.shape))
+
+    return edge_cover(distance)
+
+
+def center(representations):
+    vec_center = np.mean(
+        np.concatenate(
+            [mat for mat, txt in representations]), 0, keepdims=True)
+    return [(mat - vec_center, txt) for mat, txt in representations]
+
+
+def em_step(src_repr, tgt_repr, penalty, orig_cca):
+    src_vectors = []
+    tgt_vectors = []
+
+    print("Computing alignment ...", end="", file=sys.stderr)
+    for (src_mat, _), (tgt_mat, _) in zip(src_repr, tgt_repr):
+        for i, j in align(src_mat, tgt_mat, penalty, orig_cca):
+            src_vectors.append(src_mat[i])
+            tgt_vectors.append(tgt_mat[j])
+    print("Done", file=sys.stderr)
+
+    new_cca = CCA(n_components=128)
+    print("Fitting CCA ...", end="", file=sys.stderr)
+    new_cca.fit(src_vectors, tgt_vectors)
+    print("Done", file=sys.stderr)
+
+    return new_cca
+
+
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument(
@@ -76,6 +120,9 @@ def main():
     parser.add_argument(
         "--verbose", default=False, action="store_true",
         help="If true, print the actual alignment.")
+    parser.add_argument(
+        "--iterations", type=int, default=0,
+        help="Number of EM iterations.")
     parser.add_argument("--num-threads", type=int, default=4)
     args = parser.parse_args()
 
@@ -94,26 +141,16 @@ def main():
     print("Data loaded.", file=sys.stderr)
 
     if args.center_lng:
-        src_center = np.mean(
-            np.concatenate([mat for mat, txt in src_repr]), 0, keepdims=True)
-        tgt_center = np.mean(
-            np.concatenate([mat for mat, txt in tgt_repr]), 0, keepdims=True)
+        src_repr, tgt_repr = center(src_repr), center(tgt_repr)
 
-        src_repr = [(mat - src_center, txt) for mat, txt in src_repr]
-        tgt_repr = [(mat - tgt_center, txt) for mat, txt in tgt_repr]
+    cca = None
+    for iteration in range(args.iterations):
+        print(f"Iteration {iteration + 1}", file=sys.stderr)
+        cca = em_step(src_repr, tgt_repr, args.reordering_penalty, cca)
+        print("Done.", file=sys.stderr)
 
     for (src_mat, src_tok), (tgt_mat, tgt_tok) in zip(src_repr, tgt_repr):
-        # Cosine in (-1, 1) and MWEC requires positive weights => 2 -
-        distance = 2 - (
-            np.dot(src_mat, tgt_mat.T)
-            / np.expand_dims(np.linalg.norm(src_mat, axis=1), 1)
-            / np.expand_dims(np.linalg.norm(tgt_mat, axis=1), 0))
-
-        if args.reordering_penalty > 0:
-            distance += (
-                args.reordering_penalty * reordering_penalty(*distance.shape))
-
-        alignment = edge_cover(distance)
+        alignment = align(src_mat, tgt_mat, args.reordering_penalty, cca)
 
         if args.verbose:
             for i, token in enumerate(src_tok):
