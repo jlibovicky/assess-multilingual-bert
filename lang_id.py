@@ -141,7 +141,7 @@ def main():
     print("Loading validation data.")
     val_batches_raw = list(load_and_batch_data(
         args.val_data_txt, args.val_data_lng, tokenizer,
-        lng2idx, batch_size=32, epochs=1))[:2]
+        lng2idx, batch_size=32, epochs=1))
     print("Validation data loaded in memory, pre-computing BERT.")
     val_batches = []
     with torch.no_grad():
@@ -153,7 +153,7 @@ def main():
     print("Loading test data.")
     test_batches_raw = list(load_and_batch_data(
         args.test_data_txt, args.test_data_lng, tokenizer,
-        lng2idx, batch_size=32, epochs=1))[:2]
+        lng2idx, batch_size=32, epochs=1))
     print("Test data loaded in memory, pre-computing BERT.")
     test_batches = []
     with torch.no_grad():
