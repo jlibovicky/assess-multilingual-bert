@@ -4,7 +4,9 @@
 
 import argparse
 import logging
+import sys
 
+import joblib
 import numpy as np
 import torch
 import torch.nn as nn
@@ -67,8 +69,30 @@ def main():
     parser.add_argument(
         "--center-lng", default=False, action="store_true",
         help="Center languages to be around coordinate origin.")
+    parser.add_argument(
+        "--projections", default=None, nargs="+",
+        help="List of sklearn projections for particular languages.")
     parser.add_argument("--num-threads", type=int, default=4)
     args = parser.parse_args()
+
+    if args.center_lng and args.projections is not None:
+        print("You cannot do projections and centering at once.",
+              file=sys.stderr)
+        exit(1)
+    if (args.projections is not None and
+            len(args.projections) != len(args.data)):
+        print("You must have a projection for each data file.",
+              file=sys.stderr)
+        exit(1)
+
+    projections = None
+    if args.projections is not None:
+        projections = []
+        for proj_str in args.projections:
+            if proj_str == "None":
+                projections.append(None)
+            else:
+                projections.append(joblib.load(proj_str))
 
     distance_fn = None
     if args.distance == "cosine":
@@ -87,7 +111,7 @@ def main():
     representations = []
 
     with torch.no_grad():
-        for text_file in args.data:
+        for i, text_file in enumerate(args.data):
             print(f"Processing {text_file}")
             vectors = [
                 get_repr_from_layer(
@@ -99,6 +123,10 @@ def main():
             lng_repr = torch.cat(vectors, dim=0)
             if args.center_lng:
                 lng_repr = lng_repr - lng_repr.mean(0, keepdim=True)
+
+            if projections is not None and projections[i] is not None:
+                proj = projections[i]
+                lng_repr = torch.from_numpy(proj.predict(lng_repr.numpy()))
 
             representations.append(lng_repr)
 
