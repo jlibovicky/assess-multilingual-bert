@@ -7,6 +7,7 @@ import argparse
 import logging
 import sys
 
+import joblib
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,6 +17,12 @@ from pytorch_pretrained_bert import BertTokenizer, BertModel
 from utils import vectors_for_sentence, load_bert
 
 logging.basicConfig(level=logging.INFO)
+
+
+def apply_sklearn_proj(representations, model_path):
+    print("Projecting representations.", file=sys.stderr)
+    model = joblib.load(model_path)
+    return [model.predict(rep) for rep in representations]
 
 
 def main():
@@ -32,8 +39,20 @@ def main():
     parser.add_argument(
         "--center-lng", default=False, action="store_true",
         help="If true, center representations first.")
+    parser.add_argument(
+        "--src-proj", default=None, type=str,
+        help="Sklearn projection of the source language.")
+    parser.add_argument(
+        "--mt-proj", default=None, type=str,
+        help="Sklearn projection of the target language.")
     parser.add_argument("--num-threads", type=int, default=4)
     args = parser.parse_args()
+
+    if args.center_lng and (
+            args.src_proj is not None and args.src_proj is not None):
+        print("You can either project or center "
+              "the representations, not both.", file=sys.stderr)
+        exit(1)
 
     torch.set_num_threads(args.num_threads)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -62,6 +81,11 @@ def main():
 
         src_repr = [r - src_center for r in src_repr]
         mt_repr = [r - mt_center for r in mt_repr]
+
+    if args.src_proj is not None:
+        src_repr = apply_sklearn_proj(src_repr, args.src_proj)
+    if args.mt_proj is not None:
+        mt_repr = apply_sklearn_proj(mt_repr, args.mt_proj)
 
     for src, mt in zip(src_repr, mt_repr):
         similarity = (
