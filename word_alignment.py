@@ -7,12 +7,14 @@ import argparse
 import logging
 import sys
 
+import joblib
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer, BertModel
-from sklearn.cross_decomposition import CCA
+from sklearn.linear_model import LinearRegression
+from sklearn.neural_network import MLPRegressor
 
 from utils import vectors_for_sentence, load_bert
 from mwec import edge_cover
@@ -29,8 +31,9 @@ def call_bert_and_collapse_tokens(filename, model, tokenizer, layer):
                 bert_tokens = []
                 for token in original_tokens:
                     bert_split = tokenizer.tokenize(token)
-                    token_spans.append(len(bert_split))
-                    bert_tokens.extend(bert_split)
+                    if len(bert_split) >= 1:
+                        token_spans.append(len(bert_split))
+                        bert_tokens.extend(bert_split)
 
                 vectors = vectors_for_sentence(
                     tokenizer, model, bert_tokens, layer,
@@ -47,6 +50,13 @@ def call_bert_and_collapse_tokens(filename, model, tokenizer, layer):
                 yield np.stack(vectors_squeezed), original_tokens
 
 
+def apply_sklearn_proj(representations, model_path):
+    print("Projecting representations.", file=sys.stderr)
+    model = joblib.load(model_path)
+    for vectors, tokens in representations:
+        yield model.predict(vectors), tokens
+
+
 def reordering_penalty(src_size, tgt_size):
     """Penalty for reordering 0-1 based on relative token distance."""
     penalty_matrix = np.zeros((src_size, tgt_size))
@@ -57,9 +67,9 @@ def reordering_penalty(src_size, tgt_size):
     return penalty_matrix
 
 
-def align(src_mat, tgt_mat, penalty, cca=None):
-    if cca is not None:
-        src_mat, tgt_mat = cca.transform(src_mat, tgt_mat)
+def align(src_mat, tgt_mat, penalty, proj=None):
+    if proj is not None:
+        src_mat = proj.predict(src_mat)
 
     # Cosine in (-1, 1) and MWEC requires positive weights => 2 -
     distance = 2 - (
@@ -70,7 +80,6 @@ def align(src_mat, tgt_mat, penalty, cca=None):
     if penalty > 0:
         distance += (
             penalty * reordering_penalty(*distance.shape))
-
     return edge_cover(distance)
 
 
@@ -81,23 +90,46 @@ def center(representations):
     return [(mat - vec_center, txt) for mat, txt in representations]
 
 
-def em_step(src_repr, tgt_repr, penalty, orig_cca):
+def em_step(src_repr, tgt_repr, penalty, orig_proj):
     src_vectors = []
     tgt_vectors = []
 
-    print("Computing alignment ...", end="", file=sys.stderr)
+    print("Computing alignment ... ", end="", file=sys.stderr, flush=True)
     for (src_mat, _), (tgt_mat, _) in zip(src_repr, tgt_repr):
-        for i, j in align(src_mat, tgt_mat, penalty, orig_cca):
+        for i, j in align(src_mat, tgt_mat, penalty, orig_proj):
             src_vectors.append(src_mat[i])
             tgt_vectors.append(tgt_mat[j])
     print("Done", file=sys.stderr)
 
-    new_cca = CCA(n_components=128)
-    print("Fitting CCA ...", end="", file=sys.stderr)
-    new_cca.fit(src_vectors, tgt_vectors)
+    new_proj = MLPRegressor((768), early_stopping=True) #LinearRegression()
+    print("Fitting regression ... ", end="", file=sys.stderr, flush=True)
+    new_proj.fit(src_vectors, tgt_vectors)
     print("Done", file=sys.stderr)
 
-    return new_cca
+    return new_proj
+
+
+def load_data(
+        src, tgt, model, tokenizer, layer, center_lng, src_proj, tgt_proj):
+    print(f"Loading src: {src} ... ", file=sys.stderr, end="", flush=True)
+    src_repr = list(call_bert_and_collapse_tokens(
+        src, model, tokenizer, layer))
+    print("Done", file=sys.stderr)
+
+    print(f"Loading tgt: {tgt} ... ", file=sys.stderr, end="", flush=True)
+    tgt_repr = list(call_bert_and_collapse_tokens(
+        tgt, model, tokenizer, layer))
+    print("Done", file=sys.stderr)
+
+    if center_lng:
+        print("Centering data.", file=sys.stderr)
+        src_repr, tgt_repr = center(src_repr), center(tgt_repr)
+    if src_proj is not None:
+        src_repr = list(apply_sklearn_proj(src_repr, src_proj))
+    if tgt_proj is not None:
+        tgt_repr = list(apply_sklearn_proj(tgt_repr, tgt_proj))
+
+    return src_repr, tgt_repr
 
 
 def main():
@@ -115,6 +147,12 @@ def main():
         "--center-lng", default=False, action="store_true",
         help="If true, center representations first.")
     parser.add_argument(
+        "--src-proj", default=None, type=str,
+        help="Sklearn projection of the source language.")
+    parser.add_argument(
+        "--tgt-proj", default=None, type=str,
+        help="Sklearn projection of the target language.")
+    parser.add_argument(
         "--reordering-penalty", default=1e-5, type=float,
         help="Penalty for long-distance alignment added to cost.")
     parser.add_argument(
@@ -123,34 +161,55 @@ def main():
     parser.add_argument(
         "--iterations", type=int, default=0,
         help="Number of EM iterations.")
+    parser.add_argument(
+        "--train-data", type=str, nargs=2, default=None,
+        help="Training data for EM training.")
+    parser.add_argument(
+        "--save-projection", type=str, default=None,
+        help="Location to save the word projection.")
     parser.add_argument("--num-threads", type=int, default=4)
     args = parser.parse_args()
+
+    if args.center_lng and (
+            args.src_proj is not None and args.tgt_proj is not None):
+        print("You can either project or center "
+              "the representations, not both.", file=sys.stderr)
+        exit(1)
 
     torch.set_num_threads(args.num_threads)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     tokenizer, model = load_bert(args.bert_model, device)[:2]
 
-    print(f"Loading src: {args.src}", file=sys.stderr)
-    src_repr = list(call_bert_and_collapse_tokens(
-        args.src, model, tokenizer, args.layer))
+    proj = None
+    if args.iterations > 0:
+        if args.train_data is None:
+            print("You need to specify train data for EM training.",
+                  file=sys.stderr)
+            exit(1)
 
-    print(f"Loading tgt: {args.tgt}", file=sys.stderr)
-    tgt_repr = list(call_bert_and_collapse_tokens(
-        args.tgt, model, tokenizer, args.layer))
-    print("Data loaded.", file=sys.stderr)
+        print("Loading training data.", file=sys.stderr)
+        train_src_repr, train_tgt_repr = load_data(
+            args.train_data[0], args.train_data[1],
+            model, tokenizer, args.layer,
+            args.center_lng, args.src_proj, args.tgt_proj)
 
-    if args.center_lng:
-        src_repr, tgt_repr = center(src_repr), center(tgt_repr)
+        for iteration in range(args.iterations):
+            print(f"Iteration {iteration + 1}", file=sys.stderr)
+            proj = em_step(
+                train_src_repr, train_tgt_repr, args.reordering_penalty, proj)
+            print("Done.", file=sys.stderr)
 
-    cca = None
-    for iteration in range(args.iterations):
-        print(f"Iteration {iteration + 1}", file=sys.stderr)
-        cca = em_step(src_repr, tgt_repr, args.reordering_penalty, cca)
-        print("Done.", file=sys.stderr)
+        if args.save_projection:
+            joblib.dump(proj, args.save_projection)
+
+    print("Loading test data.", file=sys.stderr)
+    src_repr, tgt_repr = load_data(
+        args.src, args.tgt, model, tokenizer, args.layer,
+        args.center_lng, args.src_proj, args.tgt_proj)
 
     for (src_mat, src_tok), (tgt_mat, tgt_tok) in zip(src_repr, tgt_repr):
-        alignment = align(src_mat, tgt_mat, args.reordering_penalty, cca)
+        alignment = align(src_mat, tgt_mat, args.reordering_penalty, proj)
 
         if args.verbose:
             for i, token in enumerate(src_tok):
