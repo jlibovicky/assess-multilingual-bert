@@ -4,8 +4,8 @@ from pytorch_pretrained_bert import BertTokenizer, BertModel
 
 
 def text_data_generator(path, tokenizer, epochs=1, max_len=510):
-    with open(path, 'r', encoding='utf-8') as f_txt:
-        for _ in range(epochs):
+    for _ in range(epochs):
+        with open(path, 'r', encoding='utf-8') as f_txt:
             for line in f_txt:
                 sentence = line.strip()
 
