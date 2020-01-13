@@ -147,6 +147,11 @@ def main():
                 print(f" ... iteration {i + 1}")
                 for lng1, repr1 in zip(args.data, representations):
                     for lng2, repr2 in zip(args.data, representations):
+                        if mutual_projections is not None:
+                            proj = mutual_projections[(lng1, lng2)]
+                            repr1 = torch.from_numpy(
+                                proj.predict(repr1.numpy()))
+
                         distances = distance_fn(repr1, repr2)
                         retrieved = repr2[distances.min(dim=1)[1]]
                         proj = LinearRegression()
