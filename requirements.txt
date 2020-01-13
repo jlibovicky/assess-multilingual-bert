@@ -1,0 +1,6 @@
+torch
+torchvision
+git+https://github.com/huggingface/pytorch-pretrained-BERT.git
+matplotlib
+scikit-learn
+pytorch-revgrad
