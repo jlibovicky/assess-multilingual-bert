@@ -1,7 +1,15 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""Train language ID with BERT."""
+"""Finetune mBERT to remove language information.
+
+The deafult way of removing the langage information is an adversarial
+classifier with gradient reversal layer. Additionaly, the language information
+can be removed by forcing language centroids to be similar. This way of
+training requires the training data to be preapred with respect to the batch
+size, such that the first half of the batch contains one language and the other
+part another language.
+"""
 
 import argparse
 import os
@@ -29,15 +37,6 @@ def main():
         "train_data_lng", type=str,
         help="Language codes for training sentences.")
     parser.add_argument(
-        "val_data_txt", type=str, help="Validation sentences.")
-    parser.add_argument(
-        "val_data_lng", type=str,
-        help="Language codes for validation sentences.")
-    parser.add_argument(
-        "test_data_txt", type=str, help="Test sentences.")
-    parser.add_argument(
-        "test_data_lng", type=str, help="Language codes for test sentences.")
-    parser.add_argument(
         "--hidden", default=1024, type=int,
         help="Size of the hidden classification layer.")
     parser.add_argument("--num-threads", type=int, default=4)
@@ -46,6 +45,9 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--update-every-batch", type=int, default=10)
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument(
+        "--tighten-centroids", default=False, action="store_true",
+        help="Make centroids of the first an the second half closer.")
     parser.add_argument(
         "--bert-lr", type=float, default=1e-7,
         help="Learning rate for finetuning BERT.")
@@ -87,6 +89,10 @@ def main():
             {"params": cls.parameters()} for cls
             in cls_classifiers + state_classifiers],
         lr=1e-4)
+
+    cosine = None
+    if args.tighten_centroids:
+        cosine = torch.nn.CosineSimilarity()
 
     for i, (sentences, lng) in enumerate(train_batches):
         try:
@@ -152,6 +158,22 @@ def main():
 
             loss = sum(cls_losses) + sum(mean_losses) + 100 * bert_loss
 
+            if args.tighten_centroids:
+                cls_half_1 = torch.stack([
+                    mat[:args.batch_size // 2].mean(0) for mat in cls_repr])
+                cls_half_2 = torch.stack([
+                    mat[args.batch_size // 2:].mean(0) for mat in cls_repr])
+
+                state_half_1 = torch.stack([
+                    mat[:args.batch_size // 2].mean(0) for mat in state_repr])
+                state_half_2 = torch.stack([
+                    mat[args.batch_size // 2:].mean(0) for mat in state_repr])
+
+                structure_loss = (1 - cosine(
+                    torch.cat([cls_half_1, state_half_1]),
+                    torch.cat([cls_half_2, state_half_2]))).sum()
+                loss += structure_loss
+
             loss.backward()
             if i % args.update_every_batch == args.update_every_batch - 1:
                 optimizer.step()
@@ -162,10 +184,14 @@ def main():
                 def loss_to_pyfloat(loss):
                     return loss.cpu().detach().numpy().tolist()
 
-                print(
+                log_string = (
                     f'{time.strftime("%Y-%m-%d %H:%M:%S")}, {i + 1} steps:   '
                     f"BERT loss: {loss_to_pyfloat(bert_loss):5g}  "
                     f"lngid loss: {loss_to_pyfloat(lngid_loss):5g}")
+                if args.tighten_centroids:
+                    log_string += (
+                        f"  centroid loss: {loss_to_pyfloat(structure_loss):5g}")
+                print(log_string)
 
         except KeyboardInterrupt:
             print("Training interrupted by user")
