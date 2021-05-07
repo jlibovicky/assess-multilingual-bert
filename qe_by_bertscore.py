@@ -12,7 +12,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pytorch_pretrained_bert import BertTokenizer, BertModel
 
 from utils import vectors_for_sentence, load_bert
 

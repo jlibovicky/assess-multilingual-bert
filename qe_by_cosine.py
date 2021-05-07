@@ -13,7 +13,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pytorch_pretrained_bert import BertTokenizer, BertModel
 from utils import (
     text_data_generator, batch_generator, get_repr_from_layer, load_bert)
 
@@ -28,15 +27,17 @@ def repr_for_txt_file(
         vectors = [
             get_repr_from_layer(
                 model, sentence_tensor.to(device), layer,
+                tokenizer.pad_token_id,
                 mean_pool=mean_pool).cpu()
             for sentence_tensor in batch_generator(
-                text_data_generator(filename, tokenizer), 32)]
+                text_data_generator(filename, tokenizer), 32, tokenizer)]
 
         lng_repr = torch.cat(vectors, dim=0)
         if center_lng:
             lng_repr = lng_repr - lng_repr.mean(0, keepdim=True)
     print("Done.", file=sys.stderr)
     return lng_repr
+
 
 def apply_sklearn_proj(representations, model_path):
     print("Projecting representations.", file=sys.stderr)

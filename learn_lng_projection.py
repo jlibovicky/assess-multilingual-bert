@@ -23,10 +23,10 @@ def repr_for_text_file(text_file, model, tokenizer, layer, mean_pool):
     with torch.no_grad():
         vectors = [
             get_repr_from_layer(
-                model, sentence_tensor, layer,
+                model, sentence_tensor, layer, tokenizer.pad_token_id,
                 mean_pool=mean_pool)
             for sentence_tensor in batch_generator(
-                text_data_generator(text_file, tokenizer), 64)]
+                text_data_generator(text_file, tokenizer), 64, tokenizer)]
         return torch.cat(vectors, dim=0).numpy()
 
 

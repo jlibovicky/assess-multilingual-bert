@@ -1,6 +1,10 @@
 import os
+
+import joblib
+import numpy as np
 import torch
-from pytorch_pretrained_bert import BertTokenizer, BertModel
+from transformers import AutoTokenizer, AutoModel
+from sacremoses import MosesTokenizer
 
 
 def text_data_generator(path, tokenizer, epochs=1, max_len=510):
@@ -8,15 +12,10 @@ def text_data_generator(path, tokenizer, epochs=1, max_len=510):
         with open(path, 'r', encoding='utf-8') as f_txt:
             for line in f_txt:
                 sentence = line.strip()
-
-                # 512 is the maximum input size of BERT
-                tokens = tokenizer.tokenize(sentence)
-                tokenized = ["[CLS]"] + tokens[:max_len] + ["[SEP]"]
-                token_ids = tokenizer.convert_tokens_to_ids(tokenized)
-                yield torch.tensor(token_ids)
+                yield tokenizer.encode(sentence, max_length=max_len)
 
 
-def batch_generator(generator, size, padding=True):
+def batch_generator(generator, size, tokenizer, padding=True):
     """Take data generator and return batches of given size."""
     items = []
 
@@ -25,45 +24,52 @@ def batch_generator(generator, size, padding=True):
 
         if len(items) >= size:
             if padding:
-                yield pad_sentences(items)
+                yield pad_sentences(items, tokenizer)
             else:
                 yield torch.stack(items)
             items = []
     if items:
         if padding:
-            yield pad_sentences(items)
+            yield pad_sentences(items, tokenizer)
         else:
             yield torch.stack(items)
 
 
-def pad_sentences(sentences):
-    max_len = max(ex.size(0) for ex in sentences)
-    padded_batch = torch.zeros(len(sentences), max_len, dtype=torch.int64)
+def pad_sentences(sentences, tokenizer):
+    max_len = max(len(ex) for ex in sentences)
+    padded_batch = torch.zeros(
+        len(sentences), max_len, dtype=torch.int64) + tokenizer.pad_token_id
     for i, ex in enumerate(sentences):
-        padded_batch[i, :ex.size(0)] = ex
+        for j, idx in enumerate(ex):
+            padded_batch[i, j] = idx
     return padded_batch
 
 
-def get_repr_from_layer(model, data, layer, mean_pool=False):
-    mask = (data != 0).float()
+def get_repr_from_layer(model, data, layer, pad_index, mean_pool=False):
+    mask = (data != pad_index).float()
     if layer >= 0:
-        layer_output = model(data, attention_mask=mask)[0][layer]
+        layer_output = model(data, attention_mask=mask)[-1][layer]
         if mean_pool:
             mask = mask.unsqueeze(2)
             lengths = mask.long().sum(1)
 
             # Mask out [CLS] and [SEP] symbols as well.
-            mask[:, lengths - 1] = 0
-            mask[:, 0] = 0
+            # mask[:, lengths - 1] = 0
+            # mask[:, 0] = 0
             return (layer_output * mask).sum(1) / mask.sum(1)
 
         # Otherwise just take [CLS]
         return layer_output[:, 0]
 
     if layer == -1:
-        if mean_pool:
-            raise ValueError(f"Cannot mean-pool the default vector.")
-        return model(data, attention_mask=mask)[1]
+        model_output = model(data, attention_mask=mask)[0]
+        if len(model_output) == 3:
+            if mean_pool:
+                raise ValueError(f"Cannot mean-pool the default vector.")
+            return model_output[1]
+        assert mean_pool
+        mask = mask.unsqueeze(2)
+        return (model_output[0] * mask).sum(1) / mask.sum(1)
 
     raise ValueError(f"Invalid layer {layer}.")
 
@@ -75,12 +81,11 @@ def vectors_for_sentence(
     else:
         tokens = tokenizer.tokenize(sentence)
 
-    tokenized = ["[CLS]"] + tokens[:510] + ["[SEP]"]
+    tokenized = [tokenizer.cls_token] + tokens[:510] + [tokenizer.sep_token]
     token_ids = torch.tensor(
         tokenizer.convert_tokens_to_ids(tokenized)).unsqueeze(0)
 
-    layer_output = model(
-        token_ids, torch.zeros_like(token_ids))[0][layer]
+    layer_output = model(token_ids)[-1][layer]
 
     return layer_output.squeeze(0)[1:-1], tokenized[1:-1]
 
@@ -88,7 +93,7 @@ def vectors_for_sentence(
 PRETRAINED_BERTS = set([
     "bert-base-uncased", "bert-large-uncased", "bert-base-cased",
     "bert-base-multilingual-cased", "bert-base-multilingual-uncased",
-    "bert-base-chinese"])
+    "bert-base-chinese", 'xlm-roberta-base', 'distilbert-base-multilingual-cased'])
 
 
 def load_bert(bert_spec, device):
@@ -99,12 +104,16 @@ def load_bert(bert_spec, device):
             f"{bert_spec} is not a directory neither a pretrained BERT id."
             f"Available: {' '.join(PRETRAINED_BERTS)}")
 
-    tokenizer = BertTokenizer.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         bert_spec, do_lower_case=bert_spec.endswith("-uncased"))
-    model = BertModel.from_pretrained(bert_spec).to(device)
+    model = AutoModel.from_pretrained(bert_spec, output_hidden_states=True).to(device)
     model.eval()
 
-    model_dim = model.encoder.layer[-1].output.dense.out_features
+    model_dim = None
+    if hasattr(model.config, 'dim'):
+        model_dim = model.config.dim
+    if hasattr(model.config, 'hidden_size'):
+        model_dim = model.config.hidden_size
     vocab_size = model.embeddings.word_embeddings.weight.size(0)
 
     return tokenizer, model, model_dim, vocab_size
@@ -135,3 +144,55 @@ def get_lng_database():
 
             lng_info[fields[0]] = record
     return lng_info
+
+
+def load_word_embeddings(path):
+    if os.path.exists(path + ".bin"):
+        return joblib.load(path + ".bin")
+
+    embeddings_dic = {}
+    with open(path) as f_vec:
+        count_str, dim_str = f_vec.readline().strip().split()
+        _, dim = int(count_str), int(dim_str)
+
+        for line in f_vec:
+            word, vec_str = line.strip().split(maxsplit=1)
+            vector = np.fromstring(vec_str, sep=" ", dtype=np.float)
+            if vector.shape == (dim,):
+                embeddings_dic[word] = vector
+
+    return embeddings_dic
+
+
+TOKENIZERS = {}
+
+
+def get_tokenizer(lng):
+    if lng not in TOKENIZERS:
+        TOKENIZERS[lng] = MosesTokenizer(lng)
+    return TOKENIZERS[lng]
+
+
+def mean_word_embedding(embeddings, sentence, lng, mean_pool=True,
+                        skip_tokenization=False):
+    unk = embeddings["</s>"]
+    if skip_tokenization:
+        tokens = sentence.split(" ")
+    else:
+        tokens = get_tokenizer(lng).tokenize(sentence)
+    embedded_tokens = [embeddings.get(tok.lower(), unk) for tok in tokens]
+    if mean_pool:
+        return np.mean(embedded_tokens, axis=0)
+    return np.stack(embedded_tokens), tokens
+
+
+def word_embeddings_for_file(path, embeddings, lng, mean_pool=True,
+                             skip_tokenization=False):
+    embedded_sentences = []
+    with open(path) as f_txt:
+        for line in f_txt:
+            embedded_sentences.append(
+                mean_word_embedding(embeddings, line.strip(), lng,
+                                    mean_pool=mean_pool,
+                                    skip_tokenization=skip_tokenization))
+    return embedded_sentences

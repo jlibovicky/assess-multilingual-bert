@@ -11,7 +11,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pytorch_pretrained_bert import BertTokenizer, BertModel
 from sklearn.linear_model import LinearRegression
 
 from utils import (
@@ -125,9 +124,10 @@ def main():
             vectors = [
                 get_repr_from_layer(
                     model, sentence_tensor, args.layer,
+                    tokenizer.pad_token_id,
                     mean_pool=args.mean_pool)
                 for sentence_tensor in batch_generator(
-                    text_data_generator(text_file, tokenizer), 64)]
+                    text_data_generator(text_file, tokenizer), 64, tokenizer)]
 
             lng_repr = torch.cat(vectors, dim=0)
             if args.center_lng:

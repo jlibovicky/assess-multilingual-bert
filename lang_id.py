@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pytorch_pretrained_bert import BertTokenizer, BertModel
 
 from utils import (
     text_data_generator, batch_generator, get_repr_from_layer, load_bert)
@@ -28,12 +27,13 @@ def lng_data_generator(path, lng2idx, epochs=1):
 
 
 def get_centroids(
-        device, model, data, languages, labels, layer, mean_pool=False):
+        device, model, data, languages, labels, layer, tokenizer, mean_pool=False):
     """Get language centeroids based on labels."""
 
     labels = torch.cat(labels).to(device)
     text_repr = torch.cat([
-        get_repr_from_layer(model, d.to(device), layer, mean_pool=mean_pool)
+        get_repr_from_layer(model, d.to(device), layer,
+                            tokenizer.pad_token_id, mean_pool=mean_pool)
         for d in data])
     centroids = torch.zeros((len(languages), text_repr.size(1)))
     for i, _ in enumerate(languages):
@@ -46,10 +46,10 @@ def load_and_batch_data(txt, lng, tokenizer, lng2idx, batch_size=32, epochs=1):
     text_batches = batch_generator(
         text_data_generator(
             txt, tokenizer, epochs=epochs, max_len=110),
-        size=batch_size, padding=True)
+        size=batch_size, tokenizer=tokenizer, padding=True)
     lng_batches = batch_generator(
         lng_data_generator(lng, lng2idx, epochs=epochs),
-        size=batch_size, padding=False)
+        size=batch_size, tokenizer=None, padding=False)
     return zip(text_batches, lng_batches)
 
 
@@ -112,7 +112,12 @@ def main():
     if args.layer < -1:
         print("Layer index cannot be negative.")
         exit(1)
-    num_layers = len(model.encoder.layer)
+
+    num_layers = None
+    if hasattr(model.config, "num_hidden_layers"):
+        num_layers = model.config.num_hidden_layers
+    if hasattr(model.config, "n_layers"):
+        num_layers = model.config.n_layers
     if args.layer >= num_layers:
         print(f"Model only has {num_layers} layers, {args.layer} is too much.")
         exit(1)
@@ -132,7 +137,7 @@ def main():
                 labels.append(lab)
             centroids = get_centroids(
                 device, model, texts, languages, labels,
-                args.layer, mean_pool=args.mean_pool)
+                args.layer, tokenizer, mean_pool=args.mean_pool)
         centroids = centroids.to(device)
 
         if args.save_centroids:
@@ -147,7 +152,8 @@ def main():
     with torch.no_grad():
         for tokens, lng in val_batches_raw:
             bert_features = get_repr_from_layer(
-                model, tokens.to(device), args.layer, args.mean_pool).cpu()
+                model, tokens.to(device), args.layer,
+                tokenizer.pad_token_id, args.mean_pool).cpu()
             val_batches.append((bert_features, lng))
 
     print("Loading test data.")
@@ -159,7 +165,8 @@ def main():
     with torch.no_grad():
         for tokens, lng in test_batches_raw:
             bert_features = get_repr_from_layer(
-                model, tokens.to(device), args.layer, args.mean_pool).cpu()
+                model, tokens.to(device), args.layer,
+                tokenizer.pad_token_id, args.mean_pool).cpu()
             test_batches.append((bert_features, lng))
     print()
 
@@ -198,7 +205,6 @@ def main():
                     if centroids is not None:
                         bert_features = bert_features - centroids[lng]
                     prediction = classifier(bert_features)
-
                     batch_loss = criterion(prediction, lng)
 
                     predicted_lng = prediction.max(-1)[1]
@@ -227,7 +233,8 @@ def main():
                 optimizer.zero_grad()
                 sentences, lng = sentences.to(device), lng.to(device)
                 bert_features = get_repr_from_layer(
-                    model, sentences, args.layer)
+                    model, sentences, args.layer, tokenizer.pad_token_id,
+                    mean_pool=args.mean_pool)
 
                 if centroids is not None:
                     with torch.no_grad():

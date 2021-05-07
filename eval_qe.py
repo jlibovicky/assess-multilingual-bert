@@ -28,10 +28,11 @@ if __name__ == '__main__':
 
     # pearsonr and spearmanr return (correlation, p_value)
     pearson = pearsonr(gold, system)[0]
+    spearman = spearmanr(gold, system)[0]
     if args.verbose:
         print('Pearson correlation: %.4f' % pearson)
     else:
-        print(pearson)
+        print(spearman)
 
     if args.verbose:
         spearman = spearmanr(gold, system)[0]

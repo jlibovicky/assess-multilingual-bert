@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pytorch_pretrained_bert import BertTokenizer, BertModel
 from utils import (
     text_data_generator, batch_generator, get_repr_from_layer, load_bert)
 
@@ -55,7 +54,7 @@ def main():
             data_file = os.path.join(args.data, f"{code}.txt")
 
             data = text_data_generator(data_file, tokenizer)
-            batches = batch_generator(data, args.batch_size)
+            batches = batch_generator(data, args.batch_size, tokenizer)
             print(f"Data iterator initialized: {data_file}")
 
             with torch.no_grad():
@@ -63,6 +62,7 @@ def main():
                 for _, txt in zip(range(args.batch_count), batches):
                     batch_repr = get_repr_from_layer(
                         model, txt.to(device), args.layer,
+                        tokenizer.pad_token_id,
                         mean_pool=args.mean_pool).cpu().numpy()
                     if not np.any(np.isnan(batch_repr)):
                         representations.append(batch_repr)
